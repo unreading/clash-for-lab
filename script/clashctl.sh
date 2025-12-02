@@ -540,11 +540,37 @@ clashch() {
  -n [<node_name_or_index>]  交互式切换主策略组的节点，或直接指定节点名称/序号。
  -g [<group_name_or_index>] 交互式选择策略组，并进入其节点切换界面。
  -s                         进入订阅切换界面 (等同于 mihomo subscribe ch)。
+ --library <path> 修改 Mihomo 的安装/数据目录路径 (需重启终端生效)。
 EOF
         return 0
     fi
     local cmd="$1"; shift
     case "$cmd" in
+    # 修改默认的地址
+    -lib|--library)
+        local new_path="$1"
+        [ -z "$new_path" ] && { _failcat "❌ 请指定新的安装路径"; return 1; }
+        if [[ "$new_path" != /* ]]; then
+            if [ -d "$new_path" ]; then
+                new_path="$(cd "$new_path" && pwd)"
+            else
+                local parent="$(cd "$(dirname "$new_path")" 2>/dev/null && pwd)"
+                [ -z "$parent" ] && parent="$PWD"
+                new_path="${parent}/$(basename "$new_path")"
+            fi
+        fi
+        local common_file="$SCRIPT_DIR/common.sh"
+        [ ! -f "$common_file" ] && { _failcat "❌ 找不到 common.sh"; return 1; }
+        
+        _okcat "新路径: $new_path"
+        if sed -i "s|^MIHOMO_BASE_DIR=.*|MIHOMO_BASE_DIR=\"$new_path\"|" "$common_file"; then
+            _okcat "✅ 修改成功，请手动移动旧数据并重启终端。"
+        else
+            _failcat "❌ 修改失败"
+            return 1
+        fi
+        ;;
+    
     -g|-group)
         local target_idx="$1"
         local groups=(); while IFS= read -r group_name; do groups+=("$group_name"); done < <("$BIN_YQ" '.proxy-groups[] | select(.type == "select" or .type == "url-test" or .type == "fallback" or .type == "load-balance") | .name' "$MIHOMO_CONFIG_RUNTIME")
@@ -820,6 +846,7 @@ clashctl() {
     tun)           clashtun "$@" ;;
 
     # --- 其他设置 ---
+    
     port)          clashport "$@" ;;
     secret)        clashsecret "$@" ;;
     mixin)         clashmixin "$@" ;;
