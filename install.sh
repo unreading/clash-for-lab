@@ -3,7 +3,7 @@
 . script/common.sh >/dev/null 2>&1
 . script/clashctl.sh >/dev/null 2>&1
 
-# ==================== [功能] 自定义路径解析逻辑 ====================
+# ==================== 1. 自定义路径解析逻辑 ====================
 usage() {
     echo "用法: $0 [-d <安装路径>]"
     echo "  -d <path>   直接指定安装目录 (跳过互动询问)"
@@ -13,7 +13,7 @@ usage() {
 CUSTOM_INSTALL_DIR=""
 SKIP_INTERACTIVE=false
 
-# 1. 解析命令行参数 (-d)
+# 解析命令行参数
 while getopts ":d:h" opt; do
   case $opt in
     d)
@@ -30,69 +30,55 @@ while getopts ":d:h" opt; do
   esac
 done
 
-# 2. 如果没有通过 -d 指定，进入互动模式
+# 如果没有通过 -d 指定，进入互动模式
 if [ "$SKIP_INTERACTIVE" = false ]; then
-    # 显示默认目录
     _okcat '📍' "默认安装目录: $MIHOMO_BASE_DIR"
-    
-    # 询问是否使用默认目录
     echo -n "$(_okcat '🤔' '是否安装到默认目录? [Y/n]: ')"
     read -r choice
-    
     case "$choice" in
         [nN]|[nN][oO])
-            # 用户选择 No，提示输入新路径
             echo -n "$(_okcat '📂' '请输入自定义安装路径: ')"
             read -r input_path
-            
-            if [ -z "$input_path" ]; then
-                _error_quit "未输入有效路径，安装已取消"
-            fi
+            [ -z "$input_path" ] && _error_quit "未输入有效路径"
             CUSTOM_INSTALL_DIR="$input_path"
             ;;
-        *)
-            _okcat '👌' "使用默认目录..."
-            ;;
+        *) _okcat '👌' "使用默认目录..." ;;
     esac
 fi
 
-# 3. 如果设定了自定义路径 (无论是通过 -d 还是互动输入)，进行环境配置更新
+# 应用自定义路径并更新相关变量
 if [ -n "$CUSTOM_INSTALL_DIR" ]; then
-    # 处理波浪号 ~ (Bash 中 read 不会自动展开 ~)
-    if [[ "$CUSTOM_INSTALL_DIR" == ~* ]]; then
-        CUSTOM_INSTALL_DIR="${HOME}${CUSTOM_INSTALL_DIR:1}"
-    fi
-
-    # 处理相对路径转绝对路径
+    [[ "$CUSTOM_INSTALL_DIR" == ~* ]] && CUSTOM_INSTALL_DIR="${HOME}${CUSTOM_INSTALL_DIR:1}"
     case "$CUSTOM_INSTALL_DIR" in
         /*) MIHOMO_BASE_DIR="$CUSTOM_INSTALL_DIR" ;;
         *)  MIHOMO_BASE_DIR="$(pwd)/$CUSTOM_INSTALL_DIR" ;;
     esac
-
-    # 更新依赖 MIHOMO_BASE_DIR 的衍生变量
+    
+    # 手动更新所有衍生变量
     MIHOMO_SCRIPT_DIR="${MIHOMO_BASE_DIR}/script"
     MIHOMO_CONFIG_URL="${MIHOMO_BASE_DIR}/url"
+    MIHOMO_CONFIG_RAW="${MIHOMO_BASE_DIR}/config.yaml"
+    MIHOMO_SUBSCRIBES_DIR="${MIHOMO_BASE_DIR}/subscribes"
+    CURRENT_SUBSCRIBE_FILE="${MIHOMO_BASE_DIR}/config/current_sub"
     
-    # 重新调用 _set_bin 更新二进制文件路径
     _set_bin
     
-    _okcat '🎯' "目标安装目录已变更为: $MIHOMO_BASE_DIR"
+    _okcat '🎯' "目标目录: $MIHOMO_BASE_DIR"
 fi
-# ================================================================
+# ==========================================================
 
-# 用于检查环境是否有效
+# 检查卸载状态
 _valid_env
-
 if [ -d "$MIHOMO_BASE_DIR" ]; then
     _error_quit "请先执行卸载脚本,以清除安装路径：$MIHOMO_BASE_DIR"
 fi
 
 _get_kernel
 
-# 创建用户目录结构
-mkdir -p "$MIHOMO_BASE_DIR"/{bin,config,logs}
+# 创建基础目录
+mkdir -p "$MIHOMO_BASE_DIR"/{bin,config,logs,subscribes}
 
-# 解压并安装二进制文件到用户目录
+# ==================== 2. 安装二进制文件 ====================
 if ! gzip -dc "$ZIP_KERNEL" > "${MIHOMO_BASE_DIR}/bin/$BIN_KERNEL_NAME"; then
     _error_quit "解压内核文件失败: $ZIP_KERNEL"
 fi
@@ -106,7 +92,7 @@ if ! tar -xf "$ZIP_YQ" -C "${MIHOMO_BASE_DIR}/bin"; then
     _error_quit "解压 yq 失败: $ZIP_YQ"
 fi
 
-# 重命名 yq 二进制文件（yq_linux_amd64 -> yq）
+# 重命名 yq
 for yq_file in "${MIHOMO_BASE_DIR}/bin"/yq_*; do
     if [ -f "$yq_file" ]; then
         mv "$yq_file" "${MIHOMO_BASE_DIR}/bin/yq"
@@ -115,42 +101,109 @@ for yq_file in "${MIHOMO_BASE_DIR}/bin"/yq_*; do
 done
 chmod +x "${MIHOMO_BASE_DIR}/bin/yq"
 
-# 设置二进制文件路径
 _set_bin
 
-# 验证或获取配置文件
-url=""
-if ! _valid_config "$RESOURCES_CONFIG"; then
-    echo -n "$(_okcat '✈️ ' '输入订阅：')"
-    read -r url
-    _okcat '⏳' '正在下载...'
-
-    if ! _download_config "$RESOURCES_CONFIG" "$url"; then
-        _error_quit "下载失败: 请将配置内容写入 $RESOURCES_CONFIG 后重新安装"
-    fi
-
-    if ! _valid_config "$RESOURCES_CONFIG"; then
-        _error_quit "配置无效，请检查配置：$RESOURCES_CONFIG，转换日志：$BIN_SUBCONVERTER_LOG"
-    fi
-fi
-_okcat '✅' '配置可用'
-
-if [ -n "$url" ]; then
-    echo "$url" > "$MIHOMO_CONFIG_URL"
-fi
-
+# 复制资源文件
 cp -rf "$SCRIPT_BASE_DIR" "$MIHOMO_BASE_DIR/"
 cp "$RESOURCES_BASE_DIR"/*.yaml "$MIHOMO_BASE_DIR/" 2>/dev/null || true
 cp "$RESOURCES_BASE_DIR"/*.mmdb "$MIHOMO_BASE_DIR/" 2>/dev/null || true
 cp "$RESOURCES_BASE_DIR"/*.dat "$MIHOMO_BASE_DIR/" 2>/dev/null || true
 
-# ==================== [关键] 固化安装路径 ====================
-# 如果使用了自定义路径，必须修改安装好的 common.sh，否则运行时找不到路径
+# ==================== 3. 订阅配置 (跳过验证版) ====================
+
+echo -n "$(_okcat '🔗' '是否现在配置订阅链接? [Y/n]: ')"
+read -r sub_choice
+
+HAS_VALID_CONFIG=false
+
+if [[ ! "$sub_choice" =~ ^[nN] ]]; then
+    while true; do
+        # 1. 获取订阅链接
+        echo -n "$(_okcat '🌍' '请输入订阅链接 (http/https): ')"
+        read -r input_url
+        
+        if [ -z "$input_url" ]; then
+            _okcat '⏭️' "跳过订阅配置，使用默认空配置"
+            break
+        fi
+        
+        if [[ "$input_url" != http* ]]; then
+            _failcat "链接格式错误，必须以 http 或 https 开头"
+            continue
+        fi
+
+        # 2. 获取订阅名称
+        echo -n "$(_okcat '🏷️' '请命名该订阅 [默认: default]: ')"
+        read -r input_name
+        [ -z "$input_name" ] && input_name="default"
+        
+        # 验证名称合法性
+        if [[ "$input_name" =~ [^a-zA-Z0-9_.-] ]]; then
+            _failcat "名称包含非法字符，建议使用英文、数字、下划线"
+            continue
+        fi
+
+        # 3. 准备订阅目录
+        SUB_DIR="${MIHOMO_BASE_DIR}/subscribes/${input_name}"
+        mkdir -p "$SUB_DIR"
+        
+        # 保存 URL 文件
+        echo "$input_url" > "$SUB_DIR/url"
+        
+        _okcat '⏳' "正在下载订阅配置 (已启用快速模式，跳过内核验证)..."
+        
+        # 4. 下载配置 (使用 _download_raw_config 替代 _download_config)
+        # 关键修改点：仅下载，不执行 _valid_config
+        if _download_raw_config "$SUB_DIR/config.yaml" "$input_url"; then
+             _okcat '⚠️' "订阅 [$input_name] 下载成功 (已跳过验证)"
+             _okcat 'ℹ️' "提示：若订阅格式非 YAML（如 Base64），启动可能失败，请使用 mihomo update 修复。"
+             
+             # 5. 激活该订阅
+             ln -sf "$SUB_DIR/config.yaml" "$MIHOMO_BASE_DIR/config.yaml"
+             mkdir -p "$(dirname "$MIHOMO_BASE_DIR/config/current_sub")"
+             echo "$input_name" > "$MIHOMO_BASE_DIR/config/current_sub"
+             mkdir -p "$(dirname "$MIHOMO_CONFIG_URL")"
+             echo "$input_url" > "$MIHOMO_CONFIG_URL"
+             
+             HAS_VALID_CONFIG=true
+             break
+        else
+             _failcat "下载失败，清理残留文件..."
+             rm -rf "$SUB_DIR"
+             
+             echo -n "$(_okcat '🔄' '是否重试? [Y/n]: ')"
+             read -r retry_choice
+             [[ "$retry_choice" =~ ^[nN] ]] && break
+        fi
+    done
+fi
+
+# 如果没有配置订阅，恢复默认配置
+if [ "$HAS_VALID_CONFIG" = false ] && ! _valid_config "$MIHOMO_CONFIG_RAW"; then
+    if ! _valid_config "$RESOURCES_CONFIG"; then
+         _error_quit "无有效配置且默认配置无效，安装终止。"
+    fi
+    
+    # 恢复默认配置
+    DEFAULT_SUB_DIR="${MIHOMO_BASE_DIR}/subscribes/default"
+    mkdir -p "$DEFAULT_SUB_DIR"
+    cp "$RESOURCES_CONFIG" "$DEFAULT_SUB_DIR/config.yaml"
+    
+    # 激活默认订阅
+    ln -sf "$DEFAULT_SUB_DIR/config.yaml" "$MIHOMO_BASE_DIR/config.yaml"
+    echo "default" > "$MIHOMO_BASE_DIR/config/current_sub"
+    
+    _okcat '⚠️' "使用默认模板配置 (default) 继续安装"
+fi
+
+# ===========================================================
+
+# 修正安装路径配置
 if [ -n "$CUSTOM_INSTALL_DIR" ]; then
     sed -i "s|^MIHOMO_BASE_DIR=.*|MIHOMO_BASE_DIR=\"$MIHOMO_BASE_DIR\"|g" "$MIHOMO_BASE_DIR/script/common.sh"
 fi
-# ===========================================================
 
+# 安装 UI
 if ! tar -xf "$ZIP_UI" -C "$MIHOMO_BASE_DIR"; then
     _error_quit "解压 UI 文件失败: $ZIP_UI"
 fi
@@ -158,26 +211,18 @@ fi
 # 设置 shell 配置
 _set_rc
 
-# 启动代理服务
+# 启动服务
 mihomoctl on
-
-# 显示 Web UI 信息
 clashui
 
 _okcat '🎉' 'mihomo 用户空间代理已安装完成！'
 _okcat '📝' '使用说明：'
 _okcat '💡' '命令前缀: clash | mihomo | mihomoctl'
 _okcat '  • 开启/关闭: clash on/off'
-_okcat '  • 重启服务: clash restart'
-_okcat '  • 查看状态: clash status'
 _okcat '  • Web控制台: clash ui'
-_okcat '  • 更新订阅: clash update [auto|log]'
-_okcat '  • 设置订阅: clash subscribe [URL]'
-_okcat '  • 系统代理: clash proxy [on|off|status]'
-_okcat '  • 局域网访问: clash lan [on|off|status]'
+_okcat '  • 更新订阅: clash update' 
+_okcat '  • 切换订阅: clash sub list / clash sub ch <name>'
 _okcat ''
 _okcat '🏠' "安装目录: $MIHOMO_BASE_DIR"
-_okcat '📁' "配置目录: $MIHOMO_BASE_DIR/config/"
-_okcat '📋' "日志目录: $MIHOMO_BASE_DIR/logs/"
 
 _quit
