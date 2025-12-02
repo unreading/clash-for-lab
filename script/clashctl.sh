@@ -647,41 +647,100 @@ clashstatus() {
 clashui() {
     if [[ "$1" == "-h" || "$1" == "--help" ]]; then
         echo "用法: mihomo ui"
-        echo "功能: 显示 Web 控制台访问地址和当前节点信息 (节点名/延迟)。"
+        echo "功能: 显示 Web 控制台访问地址和当前节点信息。"
         return 0
     fi
     _get_ui_port
+
+    # --- 1. 检查服务状态 ---
+    if ! is_mihomo_running; then
+        _failcat "当前没有开启代理 (mihomo 未运行)"
+        return 1
+    fi
+    local resp=$(curl_api "/proxies");
+    [ -z "$resp" ] && { _failcat "❌ 无法连接 API 或 API 异常"; return 1; }
+
+    # --- 2. 获取主分组 ---
+    local group=""
+    if [ -f "$MIHOMO_CONFIG_RUNTIME" ]; then
+        group=$("$BIN_YQ" '.proxy-groups[] | select(.type == "select") | .name' "$MIHOMO_CONFIG_RUNTIME" 2>/dev/null | head -n 1)
+    fi
+    if [ -z "$group" ]; then
+        group=$(echo "$resp" | jq -r '.proxies | to_entries[] | select(.value.type=="Selector" and .key!="GLOBAL" and .key!="Global") | .key' | head -n 1)
+    fi
+    [ -z "$group" ] && group="Proxy"
+    
+    # --- 3. 获取节点数据 ---
+    local group_enc=$(urlencode "$group")
+    local node_name=$(curl_api "/proxies/$group_enc" | jq -r .now)
+    local delay="N/A"
+    
+    if [[ -n "$node_name" && "$node_name" != "null" ]]; then
+        local node_enc=$(urlencode "$node_name")
+        local delay_val=$(curl_api "/proxies/$node_enc/delay?timeout=2000&url=http://www.gstatic.com/generate_204" | jq -r '.delay // "null"')
+        [ "$delay_val" != "null" ] && delay="${delay_val}ms"
+    else 
+        node_name="无法获取"
+    fi
+
+    # --- 4. 格式化输出 (自动紧凑版) ---
     local query_url='api64.ipify.org'
     local public_ip=$(curl -s --noproxy "*" --connect-timeout 2 "$query_url")
     local public_address="http://${public_ip:-公网}:${UI_PORT}/ui"
     local local_ip=$(hostname -I | awk '{print $1}')
     local local_address="http://${local_ip}:${UI_PORT}/ui"
+    
+    # === 智能计算宽度 ===
+    # 1. 找出最长的字符串长度
+    local max_len=0
+    # 遍历所有可能较长的变量
+    for text in "$public_address" "$local_address" "$URL_CLASH_UI" "$node_name" "$group"; do
+        local len=${#text}
+        [ $len -gt $max_len ] && max_len=$len
+    done
 
-    # 自动识别分组
-    local resp=$(curl_api "/proxies")
-    local group=$(echo "$resp" | jq -r '.proxies | to_entries[] | select(.value.type=="Selector" and .key!="GLOBAL" and .key!="Global") | .key' | head -n 1)
-    [ -z "$group" ] && group="Proxy"
-    local group_enc=$(urlencode "$group")
-    local node_name=$(curl_api "/proxies/$group_enc" | jq -r .now)
-    local delay="N/A"
-    if [[ -n "$node_name" && "$node_name" != "null" ]]; then
-        local node_enc=$(urlencode "$node_name")
-        local delay_val=$(curl_api "/proxies/$node_enc/delay?timeout=2000&url=http://www.gstatic.com/generate_204" | jq -r '.delay // "null"')
-        [ "$delay_val" != "null" ] && delay="${delay_val}ms"
-    else node_name="无法获取"; fi
+    # 2. 设定总宽度
+    # 逻辑：最长内容 + 13 (标签 "🏠 内网：" 约占 9-10 宽 + 左右边距缓冲)
+    local TOTAL_WIDTH=$(( max_len + 13 ))
+
+    # 3. 设定最小宽度 (防止内容太短时框太窄)
+    [ $TOTAL_WIDTH -lt 42 ] && TOTAL_WIDTH=42
+    
+    # 生成横线
+    local line_inner=""
+    for ((i=0; i<TOTAL_WIDTH-2; i++)); do line_inner+="═"; done
+
+    # --- 内部函数：使用绝对定位打印行 ---
+    _print_line() {
+        local label="$1"
+        local value="$2"
+        printf "║ %s%s" "$label" "$value"
+        # 强制跳转到计算出的 TOTAL_WIDTH 列
+        printf "\033[${TOTAL_WIDTH}G║\n"
+    }
+
+    local header="$(_okcat 'Web 控制台')"
 
     printf "\n"
-    printf "╔═══════════════════════════════════════════════╗\n"
-    printf "║                 %s                   ║\n" "$(_okcat 'Web 控制台')"
-    printf "║═══════════════════════════════════════════════║\n"
-    printf "║     🔓 注意放行端口：%-5s                   ║\n" "$UI_PORT"
-    printf "║     🏠 内网：%-31s  ║\n" "$local_address"
-    printf "║     🌏 公网：%-31s  ║\n" "$public_address"
-    printf "║     ☁️  公共：%-31s  ║\n" "$URL_CLASH_UI"
-    printf "║                                               ║\n"
-    printf "║     📡 当前节点：%-30s ║\n" "$node_name"
-    printf "║     ⏱️  延迟：%-33s ║\n" "$delay"
-    printf "╚═══════════════════════════════════════════════╝\n\n"
+    printf "╔%s╗\n" "$line_inner"
+    
+    _print_line "$header" ""
+    
+    printf "║%s║\n" "$line_inner"
+    
+    _print_line "🔓 注意放行端口：" "$UI_PORT"
+    _print_line "🏠 内网：" "$local_address"
+    _print_line "🌏 公网：" "$public_address"
+    _print_line "☁️  公共：" "$URL_CLASH_UI"
+    
+    printf "║"
+    printf "\033[${TOTAL_WIDTH}G║\n"
+    
+    _print_line "🎯 当前分组：" "$group"
+    _print_line "🚀 当前节点：" "$node_name"
+    _print_line "⏱️  延迟：" "$delay"
+    
+    printf "╚%s╝\n\n" "$line_inner"
 }
 
 # ----------------- Proxy / Tun -----------------
