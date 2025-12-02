@@ -11,7 +11,7 @@
 [ -n "$ZSH_VERSION" ] && setopt glob no_nomatch
 
 URL_GH_PROXY='https://ghfast.top'
-URL_CLASH_UI="http://board.zash.run.place"
+URL_CLASH_UI="https://metacubexd.pages.dev"
 
 # 脚本与资源目录定义
 SCRIPT_BASE_DIR='./script'
@@ -26,10 +26,10 @@ ZIP_CLASH=$(echo ${ZIP_BASE_DIR}/clash*)
 ZIP_MIHOMO=$(echo ${ZIP_BASE_DIR}/mihomo*)
 ZIP_YQ=$(echo ${ZIP_BASE_DIR}/yq*)
 ZIP_SUBCONVERTER=$(echo ${ZIP_BASE_DIR}/subconverter*)
-ZIP_UI="${ZIP_BASE_DIR}/yacd.tar.xz"
+ZIP_UI="${ZIP_BASE_DIR}/zashboard.tar.gz"
 
 # 运行时目录定义
-MIHOMO_BASE_DIR="$HOME/tools/mihomo"
+MIHOMO_BASE_DIR="/home/kleikli/Worktools/mihomo"
 MIHOMO_SCRIPT_DIR="${MIHOMO_BASE_DIR}/$(basename $SCRIPT_BASE_DIR)"
 
 # [修复补充] 订阅管理文件路径

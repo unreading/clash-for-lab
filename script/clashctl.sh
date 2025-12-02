@@ -731,7 +731,7 @@ clashui() {
     _print_line "🔓 注意放行端口：" "$UI_PORT"
     _print_line "🏠 内网：" "$local_address"
     _print_line "🌏 公网：" "$public_address"
-    _print_line "☁️  公共：" "$URL_CLASH_UI"
+    _print_line "☁️  官方：" "$URL_CLASH_UI"
     
     printf "║"
     printf "\033[${TOTAL_WIDTH}G║\n"
