@@ -643,7 +643,6 @@ clashstatus() {
         return 1
     fi
 }
-
 clashui() {
     if [[ "$1" == "-h" || "$1" == "--help" ]]; then
         echo "用法: mihomo ui"
@@ -690,11 +689,14 @@ clashui() {
     local local_ip=$(hostname -I | awk '{print $1}')
     local local_address="http://${local_ip}:${UI_PORT}/ui"
     
+    # [新增] 定义本地转发地址 (127.0.0.1)
+    local forward_address="http://127.0.0.1:${UI_PORT}/ui"
+    
     # === 智能计算宽度 ===
     # 1. 找出最长的字符串长度
     local max_len=0
-    # 遍历所有可能较长的变量
-    for text in "$public_address" "$local_address" "$URL_CLASH_UI" "$node_name" "$group"; do
+    # [修改] 将 forward_address 加入长度计算循环，确保框线自动适应
+    for text in "$public_address" "$local_address" "$forward_address" "$URL_CLASH_UI" "$node_name" "$group"; do
         local len=${#text}
         [ $len -gt $max_len ] && max_len=$len
     done
@@ -731,6 +733,8 @@ clashui() {
     _print_line "🔓 注意放行端口：" "$UI_PORT"
     _print_line "🏠 内网：" "$local_address"
     _print_line "🌏 公网：" "$public_address"
+    # [新增] 打印本地转发地址
+    _print_line "🔗 本地：" "$forward_address"
     _print_line "☁️  官方：" "$URL_CLASH_UI"
     
     printf "║"
