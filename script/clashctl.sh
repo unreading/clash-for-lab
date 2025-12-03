@@ -405,43 +405,82 @@ clashupdate() {
 }
 
 # ----------------- Node / Group -----------------
+
 clashnow() {
-    # 1. 帮助信息优先处理
+    # 1. 帮助信息
     if [[ "$1" == "-h" || "$1" == "--help" ]]; then
         echo "用法: mihomo now"
         echo "功能: 显示当前订阅名称、主策略组、当前选中节点、延迟和核心模式。"
         return 0
     fi
 
-    # 2. [新增] 检查服务状态
+    # 2. 检查服务
     if ! is_mihomo_running; then
         _failcat "当前没有开启代理 (mihomo 未运行)"
         return 1
     fi
 
-    # 3. 原有逻辑
+    # 3. 显示订阅
     local current_sub="$(_get_current_subscribe)"
     [ -n "$current_sub" ] && printf "📂 当前订阅: %s\n" "$current_sub"
     
-    local resp=$(curl_api "/proxies"); [ -z "$resp" ] && return 1
-    
-    local group=""
-    if [ -f "$MIHOMO_CONFIG_RUNTIME" ]; then
-        group=$("$BIN_YQ" '.proxy-groups[] | select(.type == "select") | .name' "$MIHOMO_CONFIG_RUNTIME" 2>/dev/null | head -n 1)
-    fi
-    if [ -z "$group" ]; then
-        group=$(echo "$resp" | jq -r '.proxies | to_entries[] | select(.value.type=="Selector" and .key!="GLOBAL" and .key!="Global") | .key' | head -n 1)
-    fi
-    
-    [ -z "$group" ] && { echo "❌ 无法识别主分组"; return 1; }
-    
-    local group_enc=$(urlencode "$group")
-    local node=$(curl_api "/proxies/$group_enc" | jq -r .now)
-    local node_enc=$(urlencode "$node")
-    local delay=$(curl_api "/proxies/$node_enc/delay?timeout=2000&url=http://www.gstatic.com/generate_204" | jq -r '.delay // "N/A"')
+    # 4. 获取核心模式
     local mode=$(curl_api "/configs" | jq -r .mode)
     
-    printf "🎯 主分组: %s\n🚀 节点:   %s\n📶 延迟:   %s ms\n🛡️  模式:   %s\n" "$group" "$node" "$delay" "$mode"
+    # 5. 定义默认变量
+    local group_display=""
+    local node_display=""
+    local delay_display="N/A"
+    
+    # ==================== [核心逻辑修正] ====================
+    if [ "$mode" = "global" ]; then
+        # --- Global 模式逻辑 ---
+        # 主分组显示为 GLOBAL
+        group_display="GLOBAL (全局路由)"
+        
+        # 直接查询 GLOBAL 策略组的信息
+        # 注意：Mihomo API 中 GLOBAL 策略组包含当前选中的节点信息
+        local global_info=$(curl_api "/proxies/GLOBAL")
+        local global_node=$(echo "$global_info" | jq -r .now)
+        
+        if [ -n "$global_node" ] && [ "$global_node" != "null" ]; then
+            node_display="$global_node"
+            # 查询该节点的真实延迟
+            local node_enc=$(urlencode "$node_display")
+            local d=$(curl_api "/proxies/$node_enc/delay?timeout=2000&url=http://www.gstatic.com/generate_204" | jq -r '.delay // "N/A"')
+            [ "$d" != "N/A" ] && delay_display="${d}ms"
+        else
+            node_display="未知"
+        fi
+        
+    else
+        # --- Rule / Direct 模式逻辑 (原有逻辑) ---
+        # 从配置文件查找主 Selector
+        if [ -f "$MIHOMO_CONFIG_RUNTIME" ]; then
+            group_display=$("$BIN_YQ" '.proxy-groups[] | select(.type == "select") | .name' "$MIHOMO_CONFIG_RUNTIME" 2>/dev/null | head -n 1)
+        fi
+        # 兜底查找
+        if [ -z "$group_display" ]; then
+            local resp=$(curl_api "/proxies")
+            group_display=$(echo "$resp" | jq -r '.proxies | to_entries[] | select(.value.type=="Selector" and .key!="GLOBAL" and .key!="Global") | .key' | head -n 1)
+        fi
+        [ -z "$group_display" ] && group_display="无法识别"
+        
+        # 查询该 Selector 选中的节点
+        local group_enc=$(urlencode "$group_display")
+        local node_name=$(curl_api "/proxies/$group_enc" | jq -r .now)
+        node_display="$node_name"
+        
+        # 查询延迟
+        if [ -n "$node_name" ] && [ "$node_name" != "null" ]; then
+            local node_enc=$(urlencode "$node_name")
+            local d=$(curl_api "/proxies/$node_enc/delay?timeout=2000&url=http://www.gstatic.com/generate_204" | jq -r '.delay // "N/A"')
+            [ "$d" != "N/A" ] && delay_display="${d}ms"
+        fi
+    fi
+    # =======================================================
+    
+    printf "🎯 主分组: %s\n🚀 节点:  %s\n📶 延迟:  %s\n🛡️  模式:  %s\n" "$group_display" "$node_display" "$delay_display" "$mode"
 }
 
 clashgroup() {
@@ -466,33 +505,78 @@ EOF
         esac
     done
 
+    # 获取当前核心模式
+    local mode=$(curl_api "/configs" | jq -r .mode)
+
     if [ "$show_nodes" = true ]; then
-        # 交互逻辑
-        if [ -z "$target_input" ]; then
-            local all_groups=()
-            while IFS= read -r g; do all_groups+=("$g"); done < <("$BIN_YQ" '.proxy-groups[] | select(.type == "select" or .type == "url-test" or .type == "fallback" or .type == "load-balance") | .name' "$MIHOMO_CONFIG_RUNTIME")
-            if [ ${#all_groups[@]} -eq 0 ]; then echo "❌ 未找到策略组"; return 1; fi
-            echo "📋 请选择要查看的策略组:"
-            local k=1; for g in "${all_groups[@]}"; do printf " [%2d] %s\n" "$k" "$g"; ((k++)); done
-            printf "👉 输入编号: "; read -r input_idx
-            if [[ "$input_idx" =~ ^[0-9]+$ ]] && [ "$input_idx" -ge 1 ] && [ "$input_idx" -le "${#all_groups[@]}" ]; then
-                target_input="$input_idx"
-            else echo "❌ 无效编号"; return 1; fi
+        # ==================== [交互/详情模式] ====================
+        
+        # --- 1. Global 模式特殊处理 ---
+        if [ "$mode" = "global" ]; then
+            # 如果未指定目标，显示简化菜单
+            if [ -z "$target_input" ]; then
+                echo "📋 请选择要查看的策略组 (Global 模式):"
+                echo " [ 1] GLOBAL"
+                printf "👉 输入编号: "; read -r input_idx
+                if [ "$input_idx" = "1" ]; then
+                    target_input="GLOBAL"
+                else
+                    echo "❌ 无效编号"; return 1
+                fi
+            # 如果指定了编号 1，映射为 GLOBAL
+            elif [ "$target_input" = "1" ]; then
+                target_input="GLOBAL"
+            fi
+            
+            # 如果指定了其他名称但不是 GLOBAL
+            if [ "$target_input" != "GLOBAL" ] && [ "$target_input" != "1" ]; then
+                 echo "⚠️  Global 模式下仅支持查看 GLOBAL 分组"
+                 return 1
+            fi
+            
+            echo "🔄 Global 模式：正在获取全局节点列表..."
+        
+        # --- 2. Rule/Direct 模式常规处理 ---
+        else
+            if [ -z "$target_input" ]; then
+                local all_groups=()
+                while IFS= read -r g; do all_groups+=("$g"); done < <("$BIN_YQ" '.proxy-groups[] | select(.type == "select" or .type == "url-test" or .type == "fallback" or .type == "load-balance") | .name' "$MIHOMO_CONFIG_RUNTIME")
+                if [ ${#all_groups[@]} -eq 0 ]; then echo "❌ 未找到策略组"; return 1; fi
+                
+                echo "📋 请选择要查看的策略组:"
+                local k=1
+                for g in "${all_groups[@]}"; do 
+                    printf " [%2d] %s\n" "$k" "$g"
+                    ((k++))
+                done
+                printf "👉 输入编号: "; read -r input_idx
+                
+                if [[ "$input_idx" =~ ^[0-9]+$ ]] && [ "$input_idx" -ge 1 ] && [ "$input_idx" -le "${#all_groups[@]}" ]; then
+                    target_input="$input_idx"
+                else 
+                    echo "❌ 无效编号"; return 1
+                fi
+            fi
+            
+            # 解析数字编号
+            if [[ "$target_input" =~ ^[0-9]+$ ]]; then
+                local groups=(); while IFS= read -r group_name; do groups+=("$group_name"); done < <("$BIN_YQ" '.proxy-groups[] | select(.type == "select" or .type == "url-test" or .type == "fallback" or .type == "load-balance") | .name' "$MIHOMO_CONFIG_RUNTIME")
+                if [ "$target_input" -ge 1 ] && [ "$target_input" -le "${#groups[@]}" ]; then
+                    if [ -n "$ZSH_VERSION" ]; then target_input="${groups[$target_input]}"; else target_input="${groups[$((target_input-1))]}"; fi
+                else 
+                    echo "❌ 无效序号"; return 1
+                fi
+            fi
         fi
 
         local target_group="$target_input"
-        if [[ "$target_input" =~ ^[0-9]+$ ]]; then
-            local groups=(); while IFS= read -r group_name; do groups+=("$group_name"); done < <("$BIN_YQ" '.proxy-groups[] | select(.type == "select" or .type == "url-test" or .type == "fallback" or .type == "load-balance") | .name' "$MIHOMO_CONFIG_RUNTIME")
-            if [ "$target_input" -ge 1 ] && [ "$target_input" -le "${#groups[@]}" ]; then
-                if [ -n "$ZSH_VERSION" ]; then target_group="${groups[$target_input]}"; else target_group="${groups[$((target_input-1))]}"; fi
-                echo "✅ 选中序号 [$target_input]: $target_group"
-            else echo "❌ 无效序号"; return 1; fi
-        fi
-
         local resp=$(curl_api "/proxies"); [ -z "$resp" ] && { echo "❌ API 异常"; return 1; }
+        
+        # 验证组是否存在
         local chk=$(echo "$resp" | jq -r --arg g "$target_group" '.proxies[$g].all')
         if [ "$chk" = "null" ] || [ "$chk" = "" ]; then echo "❌ 策略组 '$target_group' 不存在"; return 1; fi
 
+        # 测速逻辑
         if [ "$do_test" = true ]; then
             echo "⚡️ 测速中..."
             local n_list=(); while IFS= read -r n; do n_list+=("$n"); done < <(echo "$resp" | jq -r --arg g "$target_group" '.proxies[$g].all[]')
@@ -506,27 +590,53 @@ EOF
             resp=$(curl_api "/proxies")
         fi
 
+        # 显示详情
         echo "📂 策略组: $target_group"
         echo "🏆 延迟最低 Top 5 (智能去重):"
         echo "$resp" | jq -r --arg g "$target_group" '.proxies as $root | [ $root[$g].all[] | {name: ., delay: ($root[.].history[-1].delay // 99999)} ] | map(select(.name | test("自动|直连|流量|到期|剩余|重置|官网|故障|群组|DIRECT|REJECT"; "i") | not)) | map(select(.delay > 0 and .delay < 99999)) | sort_by(.delay) | unique_by(if .name | test("[\\x{1F1E6}-\\x{1F1FF}]{2}") then (.name | match("[\\x{1F1E6}-\\x{1F1FF}]{2}").string) else (.name | gsub("\\d+|\\s+|-|_"; "") | ascii_upcase) end) | sort_by(.delay) | .[:5] | .[] | "   🚀 \(.name) (\(.delay)ms)"'
         echo "----------------------------------------"
         echo "📋 节点状态 (自适应列):"
-        local items_str=$(echo "$resp" | jq -r --arg g "$target_group" '.proxies as $root | $root[$g].now as $cur | $root[$g].all[] | . as $name | $root[$name].history[-1].delay as $d | ($d // 0) as $dd | (if $name == $cur then "* " else "  " end) + $name + " (" + (if $dd == 0 then "N/A" else ($dd | tostring) + "ms" end) + ")"')
-        [ -n "$items_str" ] && { echo "$items_str" | column -c $(tput cols) 2>/dev/null || echo "$items_str"; }
+        _interactive_node_select "$target_group" ""
         echo ""
+        
     else
-        # 默认：列出所有组
+        # ==================== [列表模式] ====================
         local resp=$(curl_api "/proxies"); [ -z "$resp" ] && return 1
         echo "📋 策略分组列表 (按配置顺序)："
         (
             echo "🆔 编号|📂 分组名称|👉 当前选中|⚡ 延迟"
             echo "---|---|---|---"
-            local i=1
-            "$BIN_YQ" '.proxy-groups[] | select(.type == "select" or .type == "url-test" or .type == "fallback" or .type == "load-balance") | .name' "$MIHOMO_CONFIG_RUNTIME" | while read -r n; do
-                local info=$(echo "$resp" | jq -r --arg g "$n" '.proxies as $p | $p[$g].now as $cur | ($p[$cur].history[-1].delay // 0) as $d1 | ($p[$cur].now // "") as $next1 | (if $d1 > 0 then $d1 elif $next1 != "" then $p[$next1] as $n2 | ($n2.history[-1].delay // 0) as $d2 | ($n2.now // "") as $next2 | (if $d2 > 0 then $d2 elif $next2 != "" then $p[$next2].history[-1].delay // 0 else 0 end) else 0 end) as $final_delay | $cur + "|" + (if $final_delay == 0 then "N/A" else ($final_delay | tostring) + "ms" end)')
-                local now="${info%|*}"; local delay="${info#*|}"
-                if [ "$now" != "null" ] && [ -n "$now" ]; then echo "$i|$n|$now|$delay"; ((i++)); fi
-            done
+            
+            # --- [Global 模式视图] ---
+            if [ "$mode" = "global" ]; then
+                # 直接获取 GLOBAL 策略组的当前选中节点
+                local now=$(echo "$resp" | jq -r '.proxies.GLOBAL.now // "未知"')
+                local delay="N/A"
+                
+                # 获取该节点的延迟
+                if [ -n "$now" ] && [ "$now" != "未知" ]; then
+                     local d=$(echo "$resp" | jq -r --arg n "$now" '.proxies[$n].history[-1].delay // 0')
+                     [ "$d" != "0" ] && delay="${d}ms"
+                fi
+                
+                # 只显示这一行
+                echo "1|GLOBAL|$now|$delay"
+            
+            # --- [Rule/Direct 模式视图] ---
+            else
+                local i=1
+                "$BIN_YQ" '.proxy-groups[] | select(.type == "select" or .type == "url-test" or .type == "fallback" or .type == "load-balance") | .name' "$MIHOMO_CONFIG_RUNTIME" | while read -r n; do
+                    # 使用简化的 jq 查询，避免嵌套错误
+                    local info=$(echo "$resp" | jq -r --arg g "$n" '
+                        .proxies[$g].now as $cur | 
+                        (.proxies[$cur].history[-1].delay // 0) as $d |
+                        $cur + "|" + (if $d == 0 then "N/A" else ($d | tostring) + "ms" end)
+                    ')
+                    
+                    local now="${info%|*}"; local delay="${info#*|}"
+                    if [ "$now" != "null" ] && [ -n "$now" ]; then echo "$i|$n|$now|$delay"; ((i++)); fi
+                done
+            fi
         ) | column -t -s '|'
         echo ""
     fi
@@ -536,24 +646,66 @@ clashch() {
     if [[ "$1" == "-h" || "$1" == "--help" ]]; then
         cat <<EOF
 用法: mihomo ch [COMMAND]
-功能: 快速切换节点或策略组，或切换订阅。
- -n [<node_name_or_index>]  交互式切换主策略组的节点，或直接指定节点名称/序号。
- -g [<group_name_or_index>] 交互式选择策略组，并进入其节点切换界面。
- -s                         进入订阅切换界面 (等同于 mihomo subscribe ch)。
- --library <path> 修改 Mihomo 的安装/数据目录路径 (需重启终端生效)。
+功能: 快速切换节点、策略组、订阅或代理模式。
+
+选项:
+ -n [<node>]     交互式切换主策略组的节点，或直接指定节点名称/序号。
+ -g [<group>]    交互式选择策略组，并进入其节点切换界面。
+ -s              进入订阅切换界面 (等同于 mihomo subscribe ch)。
+ -m [<mode>]     切换代理模式 [rule|global|direct] (支持交互选择)。
+ --library <path> 修改 Mihomo 的安装/数据目录路径。
 EOF
         return 0
     fi
-    local cmd="$1"; shift
+
+    local cmd="$1"
+    # [修复] 只有当有参数时才执行 shift，消除 "shift count must be <= $#" 报错
+    if [ $# -gt 0 ]; then shift; fi
+
     case "$cmd" in
-    # 修改默认的地址
+    # --- 模式切换 ---
+    -m|--mode)
+        local target_mode="$1"
+        if [ -z "$target_mode" ]; then
+            if ! is_mihomo_running; then _failcat "服务未运行"; return 1; fi
+            local current_mode=$(curl_api "/configs" | jq -r .mode 2>/dev/null)
+            echo "🛡️  当前模式: ${current_mode:-未知}"
+            echo "📋 请选择要切换的模式:"
+            echo "   [1] Rule   (规则模式 - 推荐)"
+            echo "   [2] Global (全局模式)"
+            echo "   [3] Direct (直连模式)"
+            echo
+            printf "👉 请输入编号 [1-3]: "
+            read -r choice
+            case "$choice" in
+                1|[rR]*) target_mode="rule" ;;
+                2|[gG]*) target_mode="global" ;;
+                3|[dD]*) target_mode="direct" ;;
+                *) echo "❌ 取消操作"; return 1 ;;
+            esac
+        fi
+        target_mode=$(echo "$target_mode" | tr '[:upper:]' '[:lower:]')
+        if [[ "$target_mode" == "global" || "$target_mode" == "rule" || "$target_mode" == "direct" ]]; then
+            local payload=$(jq -n --arg mode "$target_mode" '{mode: $mode}')
+            if curl_api "/configs" -X PATCH -d "$payload" >/dev/null; then
+                _okcat "✅ 核心模式已切换为: $target_mode"
+                if [ "$target_mode" == "global" ]; then
+                    _okcat "ℹ️ 提示: 现在使用 [mi ch] 将直接控制全局出口节点。"
+                fi
+            else
+                _failcat "❌ 切换失败 (API请求错误)"; return 1
+            fi
+        else
+            _failcat "❌ 无效模式: $target_mode"; return 1
+        fi
+        ;;
+    
+    # --- 修改安装路径 ---
     -lib|--library)
         local new_path="$1"
         [ -z "$new_path" ] && { _failcat "❌ 请指定新的安装路径"; return 1; }
         if [[ "$new_path" != /* ]]; then
-            if [ -d "$new_path" ]; then
-                new_path="$(cd "$new_path" && pwd)"
-            else
+            if [ -d "$new_path" ]; then new_path="$(cd "$new_path" && pwd)"; else
                 local parent="$(cd "$(dirname "$new_path")" 2>/dev/null && pwd)"
                 [ -z "$parent" ] && parent="$PWD"
                 new_path="${parent}/$(basename "$new_path")"
@@ -561,16 +713,12 @@ EOF
         fi
         local common_file="$SCRIPT_DIR/common.sh"
         [ ! -f "$common_file" ] && { _failcat "❌ 找不到 common.sh"; return 1; }
-        
         _okcat "新路径: $new_path"
         if sed -i "s|^MIHOMO_BASE_DIR=.*|MIHOMO_BASE_DIR=\"$new_path\"|" "$common_file"; then
-            _okcat "✅ 修改成功，请手动移动旧数据并重启终端。"
-        else
-            _failcat "❌ 修改失败"
-            return 1
-        fi
+            _okcat "✅ 修改成功，请手动移动旧数据并重启终端。"; else _failcat "❌ 修改失败"; return 1; fi
         ;;
     
+    # --- 切换策略组 ---
     -g|-group)
         local target_idx="$1"
         local groups=(); while IFS= read -r group_name; do groups+=("$group_name"); done < <("$BIN_YQ" '.proxy-groups[] | select(.type == "select" or .type == "url-test" or .type == "fallback" or .type == "load-balance") | .name' "$MIHOMO_CONFIG_RUNTIME")
@@ -593,7 +741,9 @@ EOF
         fi
         _interactive_node_select "$selected_group" ""
         ;;
+        
     -s|-subscribe) clashsubscribe ch ;;
+    
     -n|-node)
         local target="$1"
         local resp=$(curl_api "/proxies"); [ -z "$resp" ] && return 1
@@ -603,13 +753,26 @@ EOF
         [ -z "$target" ] && { _interactive_node_select "$grp" ""; return 0; }
         echo "🔍 主分组: $grp"; _interactive_node_select "$grp" "$target"
         ;;
+        
     *)
-        # 默认
+        # 默认行为：节点切换
         local direct_target="$cmd"
-        local resp=$(curl_api "/proxies"); [ -z "$resp" ] && return 1
-        local grp=$("$BIN_YQ" '.proxy-groups[] | select(.type == "select") | .name' "$MIHOMO_CONFIG_RUNTIME" 2>/dev/null | head -n 1)
-        [ -z "$grp" ] && grp=$(echo "$resp" | jq -r '.proxies | to_entries[] | select(.value.type=="Selector" and .key!="GLOBAL" and .key!="Global") | .key' | head -n 1)
-        [ -z "$grp" ] && { echo "❌ 无法识别主分组"; return 1; }
+        
+        # [优化] 获取当前模式，如果是 global，直接操作 GLOBAL 策略组
+        local mode=$(curl_api "/configs" | jq -r .mode 2>/dev/null)
+        local grp=""
+        
+        if [ "$mode" = "global" ]; then
+            grp="GLOBAL"
+            # 只有当用户没有直接指定目标时，才显示提示，避免干扰脚本调用
+            [ -z "$direct_target" ] && _okcat "🛡️  当前为 Global 模式，正在选择全局出口节点..."
+        else
+            local resp=$(curl_api "/proxies"); [ -z "$resp" ] && return 1
+            grp=$("$BIN_YQ" '.proxy-groups[] | select(.type == "select") | .name' "$MIHOMO_CONFIG_RUNTIME" 2>/dev/null | head -n 1)
+            [ -z "$grp" ] && grp=$(echo "$resp" | jq -r '.proxies | to_entries[] | select(.value.type=="Selector" and .key!="GLOBAL" and .key!="Global") | .key' | head -n 1)
+        fi
+        
+        [ -z "$grp" ] && { echo "❌ 无法识别操作分组"; return 1; }
         _interactive_node_select "$grp" "$direct_target"
         ;;
     esac
@@ -643,81 +806,163 @@ clashstatus() {
         return 1
     fi
 }
-clashui() {
+
+# ----------------- UI Update -----------------
+clashui_update() {
+    # 1. 检查环境
+    if ! command -v curl >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+        _failcat "需要 curl 和 unzip 工具，请先安装: sudo dnf install curl unzip"
+        return 1
+    fi
+
+    # 2. 获取当前配置的 UI 目录名
+    local ui_dir_name=$("$BIN_YQ" '.external-ui // "dist"' "$MIHOMO_CONFIG_MIXIN" 2>/dev/null)
+    local target_dir="$MIHOMO_BASE_DIR/$ui_dir_name"
+    
+    _okcat "🔍 检测到 Web UI 安装目录: $target_dir"
+    
+    # 3. 准备临时目录
+    local tmp_dir=$(mktemp -d)
+    local download_url="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
+    
+    # 4. 下载最新版 Zashboard
+    _okcat "⏳ 正在从 GitHub 下载最新版 Zashboard..."
+    if curl -L -o "$tmp_dir/dist.zip" --connect-timeout 10 --retry 3 "$download_url"; then
+        _okcat "✅ 下载成功，正在解压..."
+    else
+        _failcat "❌ 下载失败，请检查网络连接"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    # 5. 解压并替换
+    if unzip -q "$tmp_dir/dist.zip" -d "$tmp_dir"; then
+        # 备份旧版（可选，防止更新失败）
+        if [ -d "$target_dir" ]; then
+            mv "$target_dir" "${target_dir}.bak"
+        fi
+        
+        # 移动新版到位
+        # 注意：dist.zip 解压后通常包含一个 dist 文件夹
+        if [ -d "$tmp_dir/dist" ]; then
+            mv "$tmp_dir/dist" "$target_dir"
+        else
+            # 应对压缩包结构变化的情况，直接移动所有内容
+            mkdir -p "$target_dir"
+            cp -r "$tmp_dir/"* "$target_dir/" 2>/dev/null
+        fi
+        
+        # 清理
+        rm -rf "$tmp_dir"
+        rm -rf "${target_dir}.bak" # 更新成功后删除备份
+        
+        _okcat "🎉 Web UI 更新完成！"
+        _okcat "👉 请在浏览器中按 Ctrl+F5 强制刷新页面生效。"
+    else
+        _failcat "❌ 解压失败"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+}
+
+function clashui() {
+    # --- [新增] 子命令处理 ---
+    if [[ "$1" == "update" ]]; then
+        clashui_update
+        return $?
+    fi
+
+    # --- 帮助信息 ---
     if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-        echo "用法: mihomo ui"
-        echo "功能: 显示 Web 控制台访问地址和当前节点信息。"
+        echo "用法: mihomo ui [COMMAND]"
+        echo "功能: 显示 Web 控制台信息或管理 UI 文件。"
+        echo "  (无参数)   显示访问地址和当前节点状态"
+        echo "  update     从 GitHub 下载并更新 Web UI 文件"
         return 0
     fi
+
+    # --- 以下是原有的显示逻辑 (保持不变) ---
     _get_ui_port
 
-    # --- 1. 检查服务状态 ---
+    # 1. 检查服务状态
     if ! is_mihomo_running; then
         _failcat "当前没有开启代理 (mihomo 未运行)"
         return 1
     fi
-    local resp=$(curl_api "/proxies");
-    [ -z "$resp" ] && { _failcat "❌ 无法连接 API 或 API 异常"; return 1; }
 
-    # --- 2. 获取主分组 ---
-    local group=""
-    if [ -f "$MIHOMO_CONFIG_RUNTIME" ]; then
-        group=$("$BIN_YQ" '.proxy-groups[] | select(.type == "select") | .name' "$MIHOMO_CONFIG_RUNTIME" 2>/dev/null | head -n 1)
-    fi
-    if [ -z "$group" ]; then
-        group=$(echo "$resp" | jq -r '.proxies | to_entries[] | select(.value.type=="Selector" and .key!="GLOBAL" and .key!="Global") | .key' | head -n 1)
-    fi
-    [ -z "$group" ] && group="Proxy"
+    # 2. 获取核心模式
+    local mode=$(curl_api "/configs" | jq -r .mode)
     
-    # --- 3. 获取节点数据 ---
-    local group_enc=$(urlencode "$group")
-    local node_name=$(curl_api "/proxies/$group_enc" | jq -r .now)
-    local delay="N/A"
-    
-    if [[ -n "$node_name" && "$node_name" != "null" ]]; then
-        local node_enc=$(urlencode "$node_name")
-        local delay_val=$(curl_api "/proxies/$node_enc/delay?timeout=2000&url=http://www.gstatic.com/generate_204" | jq -r '.delay // "null"')
-        [ "$delay_val" != "null" ] && delay="${delay_val}ms"
-    else 
-        node_name="无法获取"
+    # 3. 准备显示变量
+    local group_display=""
+    local node_display=""
+    local delay_display="N/A"
+
+    # 4. 根据模式获取节点信息
+    if [ "$mode" = "global" ]; then
+        group_display="GLOBAL (全局路由)"
+        local global_info=$(curl_api "/proxies/GLOBAL")
+        local global_node=$(echo "$global_info" | jq -r .now)
+        
+        if [ -n "$global_node" ] && [ "$global_node" != "null" ]; then
+            node_display="$global_node"
+            local node_enc=$(urlencode "$node_display")
+            local d=$(curl_api "/proxies/$node_enc/delay?timeout=2000&url=http://www.gstatic.com/generate_204" | jq -r '.delay // "N/A"')
+            [ "$d" != "N/A" ] && delay_display="${d}ms"
+        else
+            node_display="未知"
+        fi
+    else
+        local resp=$(curl_api "/proxies"); 
+        [ -z "$resp" ] && { _failcat "❌ API 异常"; return 1; }
+
+        local group=""
+        if [ -f "$MIHOMO_CONFIG_RUNTIME" ]; then
+            group=$("$BIN_YQ" '.proxy-groups[] | select(.type == "select") | .name' "$MIHOMO_CONFIG_RUNTIME" 2>/dev/null | head -n 1)
+        fi
+        if [ -z "$group" ]; then
+            group=$(echo "$resp" | jq -r '.proxies | to_entries[] | select(.value.type=="Selector" and .key!="GLOBAL" and .key!="Global") | .key' | head -n 1)
+        fi
+        [ -z "$group" ] && group="Proxy"
+        
+        group_display="$group"
+        local group_enc=$(urlencode "$group")
+        local node_name=$(curl_api "/proxies/$group_enc" | jq -r .now)
+        
+        if [[ -n "$node_name" && "$node_name" != "null" ]]; then
+            node_display="$node_name"
+            local node_enc=$(urlencode "$node_name")
+            local d=$(curl_api "/proxies/$node_enc/delay?timeout=2000&url=http://www.gstatic.com/generate_204" | jq -r '.delay // "N/A"')
+            [ "$d" != "N/A" ] && delay_display="${d}ms"
+        else 
+            node_display="无法获取"
+        fi
     fi
 
-    # --- 4. 格式化输出 (自动紧凑版) ---
+    # 5. 格式化输出
     local query_url='api64.ipify.org'
     local public_ip=$(curl -s --noproxy "*" --connect-timeout 2 "$query_url")
     local public_address="http://${public_ip:-公网}:${UI_PORT}/ui"
     local local_ip=$(hostname -I | awk '{print $1}')
     local local_address="http://${local_ip}:${UI_PORT}/ui"
-    
-    # [新增] 定义本地转发地址 (127.0.0.1)
     local forward_address="http://127.0.0.1:${UI_PORT}/ui"
     
-    # === 智能计算宽度 ===
-    # 1. 找出最长的字符串长度
     local max_len=0
-    # [修改] 将 forward_address 加入长度计算循环，确保框线自动适应
-    for text in "$public_address" "$local_address" "$forward_address" "$URL_CLASH_UI" "$node_name" "$group"; do
+    for text in "$public_address" "$local_address" "$forward_address" "$URL_CLASH_UI" "$node_display" "$group_display"; do
         local len=${#text}
         [ $len -gt $max_len ] && max_len=$len
     done
 
-    # 2. 设定总宽度
-    # 逻辑：最长内容 + 13 (标签 "🏠 内网：" 约占 9-10 宽 + 左右边距缓冲)
     local TOTAL_WIDTH=$(( max_len + 13 ))
-
-    # 3. 设定最小宽度 (防止内容太短时框太窄)
     [ $TOTAL_WIDTH -lt 42 ] && TOTAL_WIDTH=42
     
-    # 生成横线
     local line_inner=""
     for ((i=0; i<TOTAL_WIDTH-2; i++)); do line_inner+="═"; done
 
-    # --- 内部函数：使用绝对定位打印行 ---
     _print_line() {
         local label="$1"
         local value="$2"
         printf "║ %s%s" "$label" "$value"
-        # 强制跳转到计算出的 TOTAL_WIDTH 列
         printf "\033[${TOTAL_WIDTH}G║\n"
     }
 
@@ -725,25 +970,18 @@ clashui() {
 
     printf "\n"
     printf "╔%s╗\n" "$line_inner"
-    
     _print_line "$header" ""
-    
     printf "║%s║\n" "$line_inner"
-    
     _print_line "🔓 注意放行端口：" "$UI_PORT"
     _print_line "🏠 内网：" "$local_address"
     _print_line "🌏 公网：" "$public_address"
-    # [新增] 打印本地转发地址
     _print_line "🔗 本地：" "$forward_address"
     _print_line "☁️  官方：" "$URL_CLASH_UI"
-    
     printf "║"
     printf "\033[${TOTAL_WIDTH}G║\n"
-    
-    _print_line "🎯 当前分组：" "$group"
-    _print_line "🚀 当前节点：" "$node_name"
-    _print_line "⏱️  延迟：" "$delay"
-    
+    _print_line "🎯 当前分组：" "$group_display"
+    _print_line "🚀 当前节点：" "$node_display"
+    _print_line "⏱️  延迟：" "$delay_display"
     printf "╚%s╝\n\n" "$line_inner"
 }
 
@@ -903,6 +1141,7 @@ clashctl() {
     # --- 状态面板与Web ---
     status)        clashstatus "$@" ;;
     ui)            clashui "$@" ;;
+
 
     # --- 代理与模式设置 ---
     proxy)         clashproxy "$@" ;;
