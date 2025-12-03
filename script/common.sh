@@ -29,7 +29,7 @@ ZIP_SUBCONVERTER=$(echo ${ZIP_BASE_DIR}/subconverter*)
 ZIP_UI="${ZIP_BASE_DIR}/zashboard.tar.gz"
 
 # 运行时目录定义
-MIHOMO_BASE_DIR="/home/kleikli/Worktools/mihomo"
+MIHOMO_BASE_DIR="~/tools/mihomo"
 MIHOMO_SCRIPT_DIR="${MIHOMO_BASE_DIR}/$(basename $SCRIPT_BASE_DIR)"
 
 # [修复补充] 订阅管理文件路径
