@@ -947,8 +947,13 @@ function clashui() {
     local local_address="http://${local_ip}:${UI_PORT}/ui"
     local forward_address="http://127.0.0.1:${UI_PORT}/ui"
     
+    # [新增] 获取配置的监听地址
+    local listener_addr=$("$BIN_YQ" '.external-controller // "127.0.0.1:9090"' "$MIHOMO_CONFIG_MIXIN" 2>/dev/null)
+    local listener_line="🔑 当前内核监听配置："
+    
     local max_len=0
-    for text in "$public_address" "$local_address" "$forward_address" "$URL_CLASH_UI" "$node_display" "$group_display"; do
+    # [修改] 纳入新变量计算宽度
+    for text in "$public_address" "$local_address" "$forward_address" "$URL_CLASH_UI" "$node_display" "$group_display" "$listener_addr"; do
         local len=${#text}
         [ $len -gt $max_len ] && max_len=$len
     done
@@ -972,7 +977,9 @@ function clashui() {
     printf "╔%s╗\n" "$line_inner"
     _print_line "$header" ""
     printf "║%s║\n" "$line_inner"
-    _print_line "🔓 注意放行端口：" "$UI_PORT"
+    _print_line "🔓 !!!注意放行端口：" "$UI_PORT"
+    _print_line "$listener_line" "$listener_addr" # <--- 新增行
+    printf "\033[${TOTAL_WIDTH}G║\n"
     _print_line "🏠 内网：" "$local_address"
     _print_line "🌏 公网：" "$public_address"
     _print_line "🔗 本地：" "$forward_address"
@@ -1095,23 +1102,126 @@ clashsecret() {
 }
 
 clashmixin() {
+    # 保持原有的帮助信息逻辑
     if [[ "$1" == "-h" || "$1" == "--help" ]]; then
         cat <<EOF
-用法: mihomo mixin [-e|-r]
+用法: mihomo mixin [Option]
 功能: 管理/查看 Mixin 配置 (用户自定义配置片段)。
- -e     编辑 Mixin 配置文件 (使用 vim, 成功保存并验证后自动重启生效)
- -r     只读查看当前的运行时配置 (runtime.yaml)
- (默认) 只读查看 Mixin 配置文件
+ (无参数)    显示交互式管理菜单 (编辑/修改监听地址)
+ -e          直接调用 vim 编辑 Mixin 配置文件
+ -r          只读查看当前的运行时配置 (runtime.yaml)
 EOF
         return 0
     fi
+
+    # 保持原有的快捷参数逻辑
     case "$1" in
-    -e) vim "$MIHOMO_CONFIG_MIXIN" && { _merge_config_restart && _okcat "配置更新成功"; };;
-    -r) less -f "$MIHOMO_CONFIG_RUNTIME" ;;
-    *) less -f "$MIHOMO_CONFIG_MIXIN" ;;
+    -e) vim "$MIHOMO_CONFIG_MIXIN" && { _merge_config_restart && _okcat "配置更新成功"; }; return ;;
+    -r) less -f "$MIHOMO_CONFIG_RUNTIME" ; return ;;
+    esac
+
+    # ==================== 新增交互菜单逻辑 ====================
+    echo "📋 Mixin 配置管理"
+    echo "----------------------------------------"
+    echo " [1] 📝 打开设置 (编辑配置文件)"
+    echo " [2] 🌐 修改监听地址 (127.0.0.1 / 0.0.0.0)"
+    echo "----------------------------------------"
+    printf "👉 请输入选项 [1-2]: "
+    read -r choice
+
+    case "$choice" in
+    1)
+        # 选项1：维持原来的打开 (vim 编辑)
+        vim "$MIHOMO_CONFIG_MIXIN" && { _merge_config_restart && _okcat "配置更新成功"; }
+        ;;
+    2)
+        # 选项2：修改监听地址 (带密码交互逻辑)
+        
+        # 1. 获取当前完整配置 (例如 127.0.0.1:9090)
+        local current_full=$("$BIN_YQ" '.external-controller // "127.0.0.1:9090"' "$MIHOMO_CONFIG_MIXIN")
+        
+        # 2. 提取端口号 (保留原端口)
+        local current_port="9090"
+        if [[ "$current_full" == *":"* ]]; then
+            current_port="${current_full##*:}" 
+        else
+            current_port="$current_full"
+        fi
+
+        echo ""
+        _okcat "当前监听地址: $current_full"
+        echo "👇 请选择新的监听模式 (端口 $current_port 将保持不变):"
+        echo " [1] 🏠 127.0.0.1 (仅限本机访问 - 安全)"
+        echo " [2] 🌏 0.0.0.0   (允许公网访问 - 需配置密码)"
+        printf "👉 请输入 [1/2]: "
+        read -r ip_choice
+
+        local new_ip=""
+        local pass_action="none" # none, set, clear
+        local new_pass=""
+
+        case "$ip_choice" in
+            1) 
+                new_ip="127.0.0.1" 
+                # 切换回本地时，询问是否清除密码
+                echo -n "❓ 是否清除 API 访问密码? [y/N]: "
+                read -r clear_pass
+                if [[ "$clear_pass" =~ ^[yY] ]]; then
+                    pass_action="clear"
+                fi
+                ;;
+            2) 
+                new_ip="0.0.0.0" 
+                # 切换到公网时，询问是否设置密码
+                echo -n "❓ 是否立即设置访问密码? (推荐) [Y/n]: "
+                read -r set_pass
+                # 默认为 Yes
+                if [[ ! "$set_pass" =~ ^[nN] ]]; then 
+                    pass_action="set"
+                    while [ -z "$new_pass" ]; do
+                        printf "⌨️  请输入新密码: "
+                        read -r new_pass
+                        [ -z "$new_pass" ] && _failcat "❌ 密码不能为空，请重新输入"
+                    done
+                else
+                    _okcat "⚠️  警告：您选择了不设置密码，公网访问将处于裸奔状态！"
+                    echo "👉 后续请务必使用 'mihomo secret <password>' 进行补设。"
+                fi
+                ;;
+            *) _failcat "❌ 无效选择"; return 1 ;;
+        esac
+
+        # 3. 拼接新地址
+        local new_val="${new_ip}:${current_port}"
+
+        # 4. 开始应用修改
+        _okcat "🔄 正在应用配置..."
+        mkdir -p "$(dirname "$MIHOMO_CONFIG_MIXIN")"
+
+        # 修改 IP
+        "$BIN_YQ" -i ".external-controller = \"$new_val\"" "$MIHOMO_CONFIG_MIXIN" 2>/dev/null
+        
+        # 处理密码逻辑
+        if [ "$pass_action" == "set" ]; then
+            "$BIN_YQ" -i ".secret = \"$new_pass\"" "$MIHOMO_CONFIG_MIXIN" 2>/dev/null
+            _okcat "🔐 密码已更新"
+        elif [ "$pass_action" == "clear" ]; then
+             "$BIN_YQ" -i ".secret = \"\"" "$MIHOMO_CONFIG_MIXIN" 2>/dev/null
+             _okcat "🔓 密码已清除"
+        fi
+
+        # 5. 重启生效
+        if [ $? -eq 0 ]; then
+            _merge_config_restart && _okcat "✅ 监听地址修改成功 ($new_val)"
+        else
+            _failcat "❌ 修改失败，请检查 yq 工具"
+        fi
+        ;;
+    *)
+        echo "取消操作"
+        ;;
     esac
 }
-
 clashnode() { clashnow "$@"; }
 
 # ==============================================================================
